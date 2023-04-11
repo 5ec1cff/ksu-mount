@@ -13,46 +13,8 @@
 using namespace std;
 
 constexpr auto SOURCE = "KSU";
-constexpr auto DUMMY_PATH = "/dev/KSU_DUMMY";
 
 #define PRINT_ERR cerr << strerror(errno) << ":"
-
-struct dummy_dir {
-private:
-    bool success = false;
-
-    void create_if_need() {
-        if (mkdir(DUMMY_PATH, 0) == -1) {
-            perror("mkdir /dev/KSU_DUMMY");
-            return;
-        }
-        if (mount(SOURCE, DUMMY_PATH, "tmpfs", MS_RDONLY, "size=0") == -1) {
-            perror("mount dummy");
-            return;
-        }
-        success = true;
-    }
-
-public:
-    optional<string> get_dummy_path() {
-        if (!success)
-            create_if_need();
-        if (!success)
-            return nullptr;
-        return DUMMY_PATH;
-    }
-
-    ~dummy_dir() {
-        if (success) {
-            if (umount2(DUMMY_PATH, MNT_DETACH) == -1) {
-                perror("umount dummy");
-            }
-            if (rmdir(DUMMY_PATH) == -1) {
-                perror("rmdir dummy");
-            }
-        }
-    }
-};
 
 bool mount_ro_overlay(const string &dest, const vector<string> &lowers) {
     auto tree = MountNode::fromProc("self");
@@ -61,18 +23,16 @@ bool mount_ro_overlay(const string &dest, const vector<string> &lowers) {
     vector<MountNodePtr> mount_seq;
     vector<int> fds;
     struct stat s{};
-    dummy_dir dummy;
     MountNode::findTopMostMountsUnderPath(mount_seq, mount_for_path, dest);
     for (auto &node: mount_seq) {
         node->print(cout);
-        auto fd = open(node->mount_point.c_str(), O_RDWR | O_PATH);
+        auto fd = open(node->mount_point.c_str(), O_PATH);
         if (fd == -1) {
             std::perror("open");
             return false;
         }
         fds.push_back(fd);
     }
-    // pause();
     bool first = true;
     for (int i = mount_seq.size() - 1; i >= 0; i--) {
         auto &node = mount_seq[i];
@@ -80,39 +40,51 @@ bool mount_ro_overlay(const string &dest, const vector<string> &lowers) {
         int lower_count = 0;
         string src, mount_point, lower_dir;
         ostringstream option_s, lower_dirs;
+        bool stock_is_dir = false;
+        // path on lower overlayfs is dir
+        bool modified_is_dir = false;
         if (first) {
+            mount_point = dest; // node->mount_point might not be the path we need (e.g. the mount point of /system is / )
             src = dest;
-            mount_point = dest;
-            first = false;
         } else {
-            src = "/proc/self/fd/" + std::to_string(fd);
             mount_point = node->mount_point;
-            if (stat(mount_point.c_str(), &s) == -1) {
-                if (errno == ENOENT || errno == ENOTDIR) {
-                    cout << "skip " << mount_point << " because it does not exists" << endl;
-                    continue;
-                } else {
-                    PRINT_ERR << " while stat " << mount_point << endl;
-                    return false;
-                }
-            }
-            if (!S_ISDIR(s.st_mode)) {
-                cout << "skip " << mount_point << " because it is not a dir" << endl;
+            src = "/proc/self/fd/" + std::to_string(fd);
+        }
+        if (stat(mount_point.c_str(), &s) == -1) {
+            if (errno == ENOENT || errno == ENOTDIR) {
+                cout << "skip " << mount_point << " because it does not exists" << endl;
+                first = false; // although root dir is unlikely not exists
                 continue;
+            } else {
+                PRINT_ERR << " while stat " << mount_point << endl;
+                return false;
             }
         }
+        if (S_ISDIR(s.st_mode)) {
+            modified_is_dir = true;
+        }
+        if (fstat(fd, &s) == -1) {
+            PRINT_ERR << " while stat fd " << fd << endl;
+            return false;
+        }
+        if (S_ISDIR(s.st_mode)) {
+            stock_is_dir = true;
+        }
+
         for (auto & lower: lowers) {
             lower_dir = lower + mount_point;
             if (stat(lower_dir.c_str(), &s) == -1) {
                 if (errno == ENOENT || errno == ENOTDIR) {
-                    cout << mount_point << ": " << lower_dir << " does not exists" << endl;
+                    cout << mount_point << ": module " << lower_dir << " does not exists" << endl;
                     continue;
                 } else {
                     PRINT_ERR << " while stat " << lower_dir << endl;
                     return false;
                 }
-            } else if (!S_ISDIR(s.st_mode)) {
-                cout << mount_point << ": " << lower_dir << " is not dir" << endl;
+            }
+            // some module's root is not dir, which is invalid
+            if (!S_ISDIR(s.st_mode) && first) {
+                cout << lower_dir << " is an invalid module" << endl;
                 continue;
             }
             lower_count++;
@@ -120,28 +92,36 @@ bool mount_ro_overlay(const string &dest, const vector<string> &lowers) {
                 lower_dirs << ":";
             lower_dirs << lower_dir;
         }
-        string option;
-        option_s << "lowerdir=";
+        // no module modifications, bind mount!
         if (lower_count == 0) {
-            cout << mount_point << ": " << " needs dummy" << endl;
-            auto dummy_path = dummy.get_dummy_path();
-            if (dummy_path.has_value()) {
-                option_s << src << ":" << dummy_path.value();
-            } else {
-                return false;
+            // we don't need to mount anything if root is not modified
+            if (first) {
+                cout << "no valid modules, skip" << endl;
+                return true;
             }
-        } else {
-            option_s << lower_dirs.str() << ":" << src;
-        }
-        option = option_s.str();
-        cout << "mounting " << mount_point << ",option:" << option << endl;
-        if (mount(SOURCE, mount_point.c_str(), "overlay", MS_RDONLY, option.c_str()) == - 1) {
-            PRINT_ERR << " failed to mount " << mount_point << " option " << option << endl;
-            cout << " trying fallback bind mount" << endl;
+            cout << "no module modifies " << mount_point << " , bind mount" << endl;
             if (mount(src.c_str(), mount_point.c_str(), nullptr, MS_BIND, nullptr) == -1) {
-                PRINT_ERR << " fallback failed while bind mount " << src << "to" << mount_point << endl;
+                PRINT_ERR << " bind mount " << src << " to " << mount_point << " because nothing get modified" << endl;
                 return false;
             }
+        } else if (stock_is_dir && modified_is_dir) {
+            string option;
+            option_s << "lowerdir=";
+            option_s << lower_dirs.str() << ":" << src;
+            option = option_s.str();
+            cout << "mounting " << mount_point << ",option:" << option << endl;
+            // some filesystem (e.g. vfat) cannot be the lowerdir of overlayfs
+            if (mount(SOURCE, mount_point.c_str(), "overlay", MS_RDONLY, option.c_str()) == - 1) {
+                PRINT_ERR << " failed to mount " << mount_point << " option " << option << endl;
+                cout << " trying fallback bind mount" << endl;
+                if (mount(src.c_str(), mount_point.c_str(), nullptr, MS_BIND, nullptr) == -1) {
+                    PRINT_ERR << " fallback failed while bind mount " << src << "to" << mount_point << endl;
+                    return false;
+                }
+            }
+        }
+        if (first) {
+            first = false;
         }
     }
     for (auto &fd: fds) {
@@ -151,6 +131,7 @@ bool mount_ro_overlay(const string &dest, const vector<string> &lowers) {
 }
 
 bool umount_ro_overlay() {
+    // TODO: only unmount top-level mount point is okay
     auto tree = MountNode::fromProc("self");
     bool success = true;
     MountNode::traversal(tree, [&](auto &node) {

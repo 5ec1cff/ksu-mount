@@ -1,0 +1,12 @@
+[package]
+name = "ksu-overlay-poc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.70"
+procfs = "0.15.1"
+sys-mount = { git = "https://github.com/tiann/sys-mount" }
+libc = "0.2"

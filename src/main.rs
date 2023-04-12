@@ -6,25 +6,23 @@ use std::os::fd::{AsRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use crate::mount_tree::*;
-use anyhow::{bail, Result};
+use anyhow::{bail, Result, ensure};
 use sys_mount::{FilesystemType, Mount, MountFlags};
 
 fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
     let mut mount_seq: Vec<MountTree> = vec![];
-    let mut fds: Vec<File> = vec![];
     let tree = MountNode::get_tree()?;
     let tree = MountNode::get_mount_for_path(&tree, &dest).unwrap();
+    let dest_str = dest.to_str().unwrap();
     MountNode::get_top_mounts_under_path(&mut mount_seq, &tree, &dest);
-    for mount in &mount_seq {
-        let file = File::options()
-            .read(true) // NEEDED, otherwise causes EINVAL in Rust (https://github.com/rust-lang/rust/issues/62314)
-            .custom_flags(libc::O_PATH)
-            .open(&mount.mount_info.mount_point)?;
-        println!("{} -> fd {}", mount.mount_info.mount_point.to_str().unwrap(), file.as_raw_fd());
-        fds.push(file);
-    }
+    let old_root = File::options()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(&dest)?;
+    ensure!(old_root.metadata()?.is_dir());
+    let old_root = format!("/proc/self/fd/{}", old_root.as_raw_fd());
     let mut first = true;
-    for (mount, fd) in mount_seq.iter().rev().zip(fds.iter().rev()) {
+    for mount in mount_seq.iter().rev() {
         let mut lower_count: usize = 0;
         let src: String;
         let mount_point: String;
@@ -32,15 +30,17 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
         let stock_is_dir: bool;
         let modified_is_dir: bool;
         if first {
-            mount_point = String::from(dest.to_str().unwrap());
-            src = String::from(dest.to_str().unwrap());
+            mount_point = String::from(dest_str);
+            src = String::from(dest_str);
             dbg!(&mount_point);
             dbg!(&src);
-            stock_is_dir = true; // assert
+            stock_is_dir = true; // ensured
         } else {
             mount_point = String::from(mount.mount_info.mount_point.to_str().unwrap());
-            src = format!("/proc/self/fd/{}", fd.as_raw_fd());
-            match fd.metadata() {
+            dbg!(&mount_point);
+            let relative = dbg!(mount_point.clone().replacen(dest_str, "", 1));
+            src = dbg!(format!("{}{}", old_root, relative));
+            match fs::metadata(&src) {
                 Ok(stat) => {
                     stock_is_dir = stat.is_dir();
                 }

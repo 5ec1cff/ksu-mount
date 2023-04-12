@@ -10,34 +10,6 @@
 
 #include <sys/sysmacros.h>
 
-#ifdef ANDROID
-
-#pragma once
-
-template <typename T>
-class reversed_container {
-public:
-    reversed_container(T &base) : base(base) {}
-    decltype(std::declval<T>().rbegin()) begin() { return base.rbegin(); }
-    decltype(std::declval<T>().crbegin()) begin() const { return base.crbegin(); }
-    decltype(std::declval<T>().crbegin()) cbegin() const { return base.crbegin(); }
-    decltype(std::declval<T>().rend()) end() { return base.rend(); }
-    decltype(std::declval<T>().crend()) end() const { return base.crend(); }
-    decltype(std::declval<T>().crend()) cend() const { return base.crend(); }
-private:
-    T &base;
-};
-
-template <typename T>
-reversed_container<T> reversed(T &base) {
-    return reversed_container<T>(base);
-}
-
-#else
-#include <ranges>
-#define reversed std::ranges::reverse_view
-#endif
-
 
 struct MountNode;
 
@@ -94,7 +66,7 @@ struct MountNode {
      */
     static MountNodePtr findMountForPath(const MountNodePtr &self, const std::string &path) {
         if (path.starts_with(self->mount_point)) {
-            for (auto & node : reversed(self->children)) {
+            for (auto & node : self->children) {
                 auto new_result = findMountForPath(node, path);
                 if (new_result != nullptr) {
                     return new_result;
@@ -110,7 +82,7 @@ struct MountNode {
      * Find all top-most child mounts for path.
      * @param self
      * @param path normalized path
-     * @return List of mounts (in reverse order)
+     * @return List of mounts
      */
     static std::vector<MountNodePtr> findChildMountForPath(const MountNodePtr &self, const std::string &path) {
         std::vector<MountNodePtr> childs;
@@ -121,7 +93,7 @@ struct MountNode {
     static void findChildMountForPath(std::vector<MountNodePtr> &children, const MountNodePtr &self, const std::string &path) {
         auto mount_for_path = findMountForPath(self, path);
         if (mount_for_path == nullptr) return;
-        for (auto & node : reversed(mount_for_path->children)) {
+        for (auto & node : mount_for_path->children) {
             if (node->mount_point.starts_with(path + "/")) {
                 children.push_back(findMountForPath(node, node->mount_point));
             }
@@ -148,7 +120,7 @@ struct MountNode {
 
     static void traversal(const MountNodePtr &node, const std::function<void(const MountNodePtr &)> &fn) {
         if (node != nullptr) {
-            for (auto &n: reversed(node->children)) {
+            for (auto &n: node->children) {
                 traversal(n, fn);
             }
             fn(node);

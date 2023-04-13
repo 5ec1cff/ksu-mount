@@ -97,10 +97,15 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
             overlay_lower_dir.push_str(":");
             overlay_lower_dir.push_str(&src);
             println!("mount overlayfs mount_point={}, src={}, options={}", mount_point, src, overlay_lower_dir);
-            Mount::builder()
+            if let Err(e) = Mount::builder()
                 .fstype(FilesystemType::from("overlay"))
                 .data(&overlay_lower_dir)
-                .mount("KSU", mount_point)?;
+                .mount("KSU", &mount_point) {
+                println!("mount overlayfs failed: {:#}, fallback to bind mount", e);
+                Mount::builder()
+                    .flags(MountFlags::BIND)
+                    .mount(src, &mount_point)?;
+            }
         }
         first = false;
     }

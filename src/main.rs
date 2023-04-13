@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use crate::mount_tree::*;
-use anyhow::{bail, Result, ensure};
+use anyhow::{bail, Result, ensure, Context};
 use sys_mount::{FilesystemType, Mount, MountFlags};
 
 fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
@@ -32,19 +32,16 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
         if first {
             mount_point = String::from(dest_str);
             src = String::from(dest_str);
-            dbg!(&mount_point);
-            dbg!(&src);
             stock_is_dir = true; // ensured
         } else {
             mount_point = String::from(mount.mount_info.mount_point.to_str().unwrap());
-            dbg!(&mount_point);
-            let relative = dbg!(mount_point.clone().replacen(dest_str, "", 1));
-            src = dbg!(format!("{}{}", old_root, relative));
+            let relative = mount_point.clone().replacen(dest_str, "", 1);
+            src = format!("{}{}", old_root, relative);
             match fs::metadata(&src) {
                 Ok(stat) => {
                     stock_is_dir = stat.is_dir();
                 }
-                Err(e) => bail!(e)
+                Err(e) => bail!("stat {}: {:#}", src, e)
             }
         }
         match fs::metadata(&mount_point) {
@@ -59,7 +56,7 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
                         continue;
                     }
                     _ => {
-                        bail!(e);
+                        bail!("stat {}: {:#}", mount_point, e);
                     }
                 }
             }
@@ -69,8 +66,10 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
             dbg!(&lower_dir);
             match fs::metadata(&lower_dir) {
                 Ok(stat) => {
-                    if !stat.is_dir() && first {
-                        println!("{} is an invalid module", lower_dir);
+                    if !stat.is_dir() {
+                        if first {
+                            println!("{} is an invalid module", lower_dir);
+                        }
                         continue;
                     }
                     lower_count += 1;
@@ -92,7 +91,8 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
             println!("mount bind mount_point={}, src={}", mount_point, src);
             Mount::builder()
                 .flags(MountFlags::BIND)
-                .mount(src, mount_point)?;
+                .mount(&src, &mount_point)
+                .with_context(|| format!("bind mount failed: {} -> {}", src, mount_point))?;
         } else if stock_is_dir && modified_is_dir {
             overlay_lower_dir.push_str(":");
             overlay_lower_dir.push_str(&src);
@@ -104,7 +104,8 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
                 println!("mount overlayfs failed: {:#}, fallback to bind mount", e);
                 Mount::builder()
                     .flags(MountFlags::BIND)
-                    .mount(src, &mount_point)?;
+                    .mount(&src, &mount_point)
+                    .with_context(|| format!("fallback bind mount failed: {} -> {}", src, mount_point))?;
             }
         }
         first = false;
@@ -112,7 +113,8 @@ fn mount_ro_overlay(dest: &PathBuf, lower_dirs: &Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn umount_ro_overlay() {}
+// we can simply umount the partion root
+// fn umount_ro_overlay() {}
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
